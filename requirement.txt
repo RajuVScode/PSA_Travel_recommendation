@@ -1,0 +1,10 @@
+langchain
+langgraph
+langchain-openai
+azure-search-documents
+azure-core
+requests
+python-dotenv
+gradio
+openai
+gradio_calendar
