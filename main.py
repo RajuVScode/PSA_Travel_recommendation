@@ -10,6 +10,7 @@ import requests
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from parse_travel_intent import extract_with_llm
+from outfit_recommendation import recommend_outfits_llm
 
 # Initialize environment
 load_dotenv()
@@ -634,7 +635,7 @@ def generate_travel_recommendation(user_prompt: str) -> str:
 
     # step 4 Append outfit recommendations from outfit_planner (if available)
     
-    from outfit_planner import recommend_outfits
+   # from outfit_planner import recommend_outfits
     print("\n[STEP 4] Build simple activities list from retrieved `events` and user prompt...")
     
     activities_list = []
@@ -654,15 +655,17 @@ def generate_travel_recommendation(user_prompt: str) -> str:
         if any(x in up for x in ["hike", "hiking", "gym", "yoga", "run", "beach", "swim"]):
             activities_list.append({"type": "hike"})
 
-    outfit_recommendations = recommend_outfits(
+    outfit_recommendations = recommend_outfits_llm(
         activities=activities_list,
         duration_days=parsed_intent.get("duration_days"),
         intention="balanced",
         climate=None,
         laundry_available=False,
         weather=weather,
-        events=events,
-        parsed_intent=parsed_intent
+        destination=parsed_intent.get("destination"),
+        start_date=parsed_intent.get("start_date"),
+        end_date=parsed_intent.get("end_date"),
+        extra_context=events
     )       
     print(outfit_recommendations)
     print(f"[INFO] Retrieved {outfit_recommendations}")       
