@@ -751,7 +751,7 @@ Given the user's travel prompt, destination, dates, weather context, and top 5 p
 2) **Recommended Activities** – indoor/outdoor options justified by the weather and destination
 3) **Clothing/Shoes/Accessories Preferences** – weather-aware and practical recommendations grounded in the forecast
 4) **Itinerary** (Weekly or Daily) – when travel-related, a day-by-day or week-by-week plan with suggested activities and attire
-5) **Local Events Summary** – Include specific event information like title, dates, venue, URL, description, and weather sensitivity. Comment on how each event's conditions should influence activities, itinerary choices, and product recommendations. 
+5) **Local Events Summary** – Provide a concise summary of relevant local events (title, dates, venue, URL), indicate whether each event is likely outdoor or indoor, and mark events as `weather-sensitive` when appropriate. For each event, comment on how the event's conditions (outdoor/indoor and likely weather) should influence activities, itinerary choices, and product recommendations from the RAG results. If no events are available, state 'No events found for the requested dates. 
 6) **Outfit/Product Recommendations** – specific items from the product catalog that align with the weather and activities
 7) **Recommended Products from Catalog** – Include specific product information like long_description, family_name, material, available_colors, available_sizes, names, brands, prices, and availability. Generate a formal response that answers the user query using only the product catalog data from RAG results above. 
 Do not add any generic product details or assumptions. 
@@ -764,9 +764,7 @@ If data is missing, state your assumptions clearly and proceed with best-practic
 
 Ensure the tone is formal, professional, and complete. All sections must be present."""
     
-     # Events requirement: instruct the model to summarize events and combine with weather/RAG
-    system_prompt += "\n\n6) **Local Events Summary** – Provide a concise summary of relevant local events (title, dates, venue, URL), indicate whether each event is likely outdoor or indoor, and mark events as `weather-sensitive` when appropriate. For each event, comment on how the event's conditions (outdoor/indoor and likely weather) should influence activities, itinerary choices, and product recommendations from the RAG results. If no events are available, state 'No events found for the requested dates.'"
-    
+   
 
     # Include weather as-is (schema-agnostic) and products as provided. Products are expected to be JSON-serializable dicts.
     weather_json = weather or {}    
@@ -794,8 +792,6 @@ Outfit/Product Recommendations:
 
 Top 5 Product Recommendations from Catalog:
 {json.dumps(products_json, indent=2)}
-
-
 
 Please provide a comprehensive, formal travel plan incorporating the above information. Ensure you include all five required sections, and weave the product details (names, brands, prices) naturally into your recommendations.
 """
