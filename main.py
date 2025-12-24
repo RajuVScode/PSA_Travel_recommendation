@@ -130,6 +130,21 @@ def get_weather_context(destination: str, start_date: str = None, end_date: str 
         
         notes = f"Based on {data_source} data for {location_name}."
         
+        print({
+            "destination": location_name,
+            "latitude": lat,
+            "longitude": lon,
+            "avg_high_c": avg_high,
+            "avg_low_c": avg_low,
+            "precipitation_chance": precip_chance,
+            "precipitation_mm": total_precip,
+            "wind_info": "Moderate winds",
+            "daylight_hours": daylight_hours,
+            "weather_description": weather_desc,
+            "notes": notes,
+            "data_source": data_source,
+            "error": None,
+        })
         return {
             "destination": location_name,
             "latitude": lat,
@@ -145,6 +160,7 @@ def get_weather_context(destination: str, start_date: str = None, end_date: str 
             "data_source": data_source,
             "error": None,
         }
+        
     else:
         # Fallback to climatology
         print(f"[DEBUG] Falling back to climatology for {destination}")
@@ -719,25 +735,4 @@ if __name__ == "__main__":
     plan = generate_travel_recommendation(user_input)
     print("\n" + plan)
     print("\n" + "=" * 80)
-
-    # Outfit suggestion integration (safe import)
-    try:
-        from outfit_planner import recommend_outfits
-
-        intent = extract_with_llm(user_input)
-        duration = intent.get("duration_days") or 1
-
-        # Build a minimal activities list from parsed intent; if none, rely on duration
-        activities = []
-        # If the user mentioned dinner or landmark words in the prompt, we might add a dinner event
-        if "dinner" in user_input.lower() or "party" in user_input.lower():
-            activities.append({"type": "dinner"})
-
-        rec = recommend_outfits(activities, duration_days=duration, intention="balanced", climate=None, laundry_available=False)
-        print("\nOutfit suggestions:")
-        print(rec.get("explanation"))
-        print("Assumptions:")
-        for a in rec.get("assumptions", []):
-            print(" - ", a)
-    except Exception as e:
-        print(f"Outfit planner not available: {e}")
+    
