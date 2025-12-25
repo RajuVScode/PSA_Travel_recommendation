@@ -11,6 +11,11 @@ from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from parse_travel_intent import extract_with_llm
 from outfit_recommendation import recommend_outfits_llm
+from get_weather_info import get_weather_context
+from get_local_events_info import get_local_events
+from get_products_from_RAG import get_raw_products_from_rag
+from typing import TypedDict, Optional, List, Dict, Any, Tuple
+from langgraph.graph import StateGraph, END 
 
 # Initialize environment
 load_dotenv()
@@ -26,358 +31,260 @@ openai_client = AzureOpenAI(
     api_key=os.environ.get("AZURE_OPENAI_KEY"),
 )
 
-
-
-def geocode_location(destination: str, timeout: int = 5) -> dict:
-    """
-    Geocode using Open-Meteo's free geocoding endpoint.
-    Returns dict with keys: latitude, longitude, name (display), admin1 (region)
-    """
-    if not destination:
-        return None
-    try:
-        geo_url = f"https://geocoding-api.open-meteo.com/v1/search?name={destination}&count=1"
-        geo_response = requests.get(geo_url, timeout=timeout).json()
-        if not geo_response.get("results"):
-            return None
-        geo = geo_response["results"][0]
-        return {
-            "latitude": geo.get("latitude"),
-            "longitude": geo.get("longitude"),
-            "name": geo.get("name"),
-            "admin1": geo.get("admin1"),
-        }
-    except Exception:
-        return None
-
-
 # =====================================================================
-# 2. WEATHER: Fetch weather data
-# =====================================================================
-def get_weather_context(destination: str, start_date: str = None, end_date: str = None) -> dict:
-    """
-    Fetch weather data for a destination and date range.
-    Falls back to climatology if real-time forecast unavailable.
-    """
-    if not destination:
-        return {
-            "destination": None,
-            "error": "No destination provided",
-            "data_source": "error",
-        }
-    
-    # Geocode destination
-    geo = geocode_location(destination)
-    if not geo:
-        return {
-            "destination": destination,
-            "error": f"Location '{destination}' not found or geocoding failed",
-            "data_source": "error",
-        }
+# ---------------------------------------------------------------------------------
+# State definition
+# ---------------------------------------------------------------------------------
 
-    lat, lon = geo.get("latitude"), geo.get("longitude")
-    location_name = f"{geo.get('name', '')}{',' + geo.get('admin1', '') if geo.get('admin1') else ''}"
-    
-    # Determine forecast vs historical
-    try:
-        if start_date:
-            start_dt = datetime.strptime(start_date, "%Y-%m-%d")
-        else:
-            start_dt = datetime.now()
-        
-        today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-        
-        # Use forecast if start_date is in the future, otherwise archive
-        if start_dt.date() > today.date():
-            url = f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&start_date={start_date or start_dt.date().isoformat()}&end_date={end_date or start_dt.date().isoformat()}&daily=temperature_2m_max,temperature_2m_min,precipitation_sum,weathercode"
-            response = requests.get(url, timeout=10).json()
-            data_source = "forecast"
-        else:
-            url = f"https://archive-api.open-meteo.com/v1/archive?latitude={lat}&longitude={lon}&start_date={start_date or start_dt.date().isoformat()}&end_date={end_date or start_dt.date().isoformat()}&daily=temperature_2m_max,temperature_2m_min,precipitation_sum,weathercode"
-            response = requests.get(url, timeout=10).json()
-            data_source = "historical"
-    except Exception as e:
-        print(f"[DEBUG] Weather API call failed: {e}")
-        data_source = "error"
-        response = None
-    
-    # Parse response
-    if response and "daily" in response:
-        daily = response.get("daily", {})
-        temps_max = daily.get("temperature_2m_max", [])
-        temps_min = daily.get("temperature_2m_min", [])
-        precip = daily.get("precipitation_sum", [])
-        codes = daily.get("weathercode", [])
-        
-        avg_high = round(sum(temps_max) / len(temps_max), 1) if temps_max else None
-        avg_low = round(sum(temps_min) / len(temps_min), 1) if temps_min else None
-        total_precip = round(sum(precip), 1) if precip else 0
-        precip_chance = round((sum(1 for p in precip if p > 0) / len(precip) * 100), 1) if precip else 0
-        
-        # Map weather code to description
-        code_desc = {
-            0: "clear sky", 1: "mainly clear", 2: "partly cloudy", 3: "overcast",
-            45: "foggy", 48: "foggy with rime", 51: "drizzle", 53: "moderate drizzle", 55: "heavy drizzle",
-            61: "rain", 63: "moderate rain", 65: "heavy rain",
-            71: "snow", 73: "moderate snow", 75: "heavy snow",
-            80: "rain showers", 81: "moderate showers", 82: "violent showers",
-            95: "thunderstorm", 96: "thunderstorm with hail", 99: "thunderstorm with hail",
-        }
-        predominant_code = codes[0] if codes else None
-        weather_desc = code_desc.get(predominant_code, "variable conditions")
-        
-        daylight_hours = 12.0
-        
-        notes = f"Based on {data_source} data for {location_name}."
-        
-        print({
-            "destination": location_name,
-            "latitude": lat,
-            "longitude": lon,
-            "avg_high_c": avg_high,
-            "avg_low_c": avg_low,
-            "precipitation_chance": precip_chance,
-            "precipitation_mm": total_precip,
-            "wind_info": "Moderate winds",
-            "daylight_hours": daylight_hours,
-            "weather_description": weather_desc,
-            "notes": notes,
-            "data_source": data_source,
-            "error": None,
-        })
-        return {
-            "destination": location_name,
-            "latitude": lat,
-            "longitude": lon,
-            "avg_high_c": avg_high,
-            "avg_low_c": avg_low,
-            "precipitation_chance": precip_chance,
-            "precipitation_mm": total_precip,
-            "wind_info": "Moderate winds",
-            "daylight_hours": daylight_hours,
-            "weather_description": weather_desc,
-            "notes": notes,
-            "data_source": data_source,
-            "error": None,
-        }
-        
+class TravelState(TypedDict, total=False):
+    """Shared state across nodes."""
+    user_prompt: str
+
+    # Intermediate artifacts
+    parsed_intent: Dict[str, Any]
+    weather: Dict[str, Any]
+    events: List[Dict[str, Any]]
+    activities: List[Dict[str, Any]]
+    outfit_recommendations: Any
+    products: List[Dict[str, Any]]
+    llm_context: Dict[str, Any]
+
+    # Final
+    plan: str
+
+    # Logging info (optional)
+    logs: List[str]
+
+
+# ---------------------------------------------------------------------------------
+# Node implementations
+# ---------------------------------------------------------------------------------
+
+def node_parse_intent(state: TravelState) -> TravelState:
+    logs = state.get("logs", [])
+    logs.append("\n" + "=" * 80)
+    logs.append("TRAVEL RECOMMENDATION PIPELINE")
+    logs.append("=" * 80)
+    logs.append("\n[STEP 1] Parsing travel intent...")
+
+    user_prompt = state["user_prompt"]
+    parsed_intent = extract_with_llm(user_prompt)
+
+    logs.append(f"[INFO] Parsed intent: {parsed_intent}")
+    return {
+        "parsed_intent": parsed_intent,
+        "logs": logs,
+    }
+
+
+def node_fetch_weather(state: TravelState) -> TravelState:
+    logs = state.get("logs", [])
+    logs.append("\n[STEP 2] Fetching weather context...")
+
+    pi = state["parsed_intent"]
+    weather = get_weather_context(
+        destination=pi.get("destination"),
+        start_date=pi.get("start_date"),
+        end_date=pi.get("end_date"),
+    )
+
+    if weather.get("error"):
+        logs.append(f"[WARNING] Weather fetch: {weather['error']}")
     else:
-        # Fallback to climatology
-        print(f"[DEBUG] Falling back to climatology for {destination}")
-        climatology = {
-            "april": {"avg_high": 12, "avg_low": 6, "precip_chance": 40, "wind": "moderate"},
-            "may": {"avg_high": 17, "avg_low": 10, "precip_chance": 35, "wind": "light to moderate"},
-            "june": {"avg_high": 22, "avg_low": 14, "precip_chance": 30, "wind": "light"},
-            "july": {"avg_high": 24, "avg_low": 16, "precip_chance": 25, "wind": "light"},
-            "august": {"avg_high": 23, "avg_low": 15, "precip_chance": 28, "wind": "light"},
-            "september": {"avg_high": 19, "avg_low": 12, "precip_chance": 35, "wind": "light to moderate"},
-            "october": {"avg_high": 14, "avg_low": 9, "precip_chance": 45, "wind": "moderate"},
-            "november": {"avg_high": 10, "avg_low": 6, "precip_chance": 50, "wind": "moderate"},
-            "december": {"avg_high": 7, "avg_low": 3, "precip_chance": 55, "wind": "moderate to strong"},
-            "january": {"avg_high": 6, "avg_low": 2, "precip_chance": 60, "wind": "moderate to strong"},
-            "february": {"avg_high": 6, "avg_low": 2, "precip_chance": 55, "wind": "moderate"},
-            "march": {"avg_high": 9, "avg_low": 4, "precip_chance": 50, "wind": "moderate"},
-        }
-        
-        month = None
-        if start_date:
-            try:
-                month = datetime.strptime(start_date, "%Y-%m-%d").strftime("%B").lower()
-            except Exception:
-                pass
-        
-        seasonal = climatology.get(month, climatology["april"])
-        
-        return {
-            "destination": destination,
-            "latitude": None,
-            "longitude": None,
-            "avg_high_c": seasonal["avg_high"],
-            "avg_low_c": seasonal["avg_low"],
-            "precipitation_chance": seasonal["precip_chance"],
-            "wind_info": seasonal["wind"],
-            "daylight_hours": 12.0,
-            "notes": f"Using typical climatology for {month or 'the destination'}. Real-time forecast unavailable.",
-            "data_source": "climatology",
-            "error": None,
-        }
-# =====================================================================
-# RAW RAG: Schema-agnostic retrieval of full documents (no hardcoded fields)
-# =====================================================================
+        logs.append("[INFO] Weather context fetched successfully.")
+
+    return {
+        "weather": weather,
+        "logs": logs,
+    }
 
 
-def get_raw_products_from_rag(
-    destination: str = None,
-    season_hint: str = None,
-    weather: dict = None,
-    user_prompt: str = None,
-    recommend_outfits: str = None,
-    top_k: int = 5,
-) -> list:
+def node_retrieve_events(state: TravelState) -> TravelState:
+    logs = state.get("logs", [])
+    logs.append("\n[STEP 3] Retrieving local events for destination and dates...")
+
+    pi = state["parsed_intent"]
+    events = get_local_events(
+        destination=pi.get("destination"),
+        start_date=pi.get("start_date"),
+        end_date=pi.get("end_date"),
+    ) or []
+
+    logs.append(f"[INFO] Retrieved {len(events)} events")
+    return {
+        "events": events,
+        "logs": logs,
+    }
+
+
+def node_build_activities_and_outfits(state: TravelState) -> TravelState:
+    logs = state.get("logs", [])
+    logs.append("\n[STEP 4] Build simple activities list from retrieved `events` and user prompt...")
+
+    events = state.get("events", [])
+    user_prompt = state["user_prompt"]
+    pi = state["parsed_intent"]
+    weather = state.get("weather")
+
+    # Build activities list
+    activities_list: List[Dict[str, Any]] = []
+    for ev in events or []:
+        if isinstance(ev, dict):
+            name = ev.get("name") or ev.get("title") or ev.get("summary") or ev.get("description")
+            date = ev.get("date") or ev.get("start") or ev.get("start_date")
+            activities_list.append({"type": name or "outing", "date": date})
+        else:
+            activities_list.append({"type": str(ev)})
+
+    # Fallback: detect explicit mentions in the user's prompt
+    up = (user_prompt or "").lower()
+    if not activities_list:
+        if "dinner" in up or "party" in up:
+            activities_list.append({"type": "dinner"})
+        if any(x in up for x in ["hike", "hiking", "gym", "yoga", "run", "beach", "swim"]):
+            activities_list.append({"type": "hike"})
+
+    # Outfits via LLM
+    outfit_recommendations = recommend_outfits_llm(
+        activities=activities_list,
+        duration_days=pi.get("duration_days"),
+        intention="balanced",
+        climate=None,
+        laundry_available=False,
+        weather=weather,
+        destination=pi.get("destination"),
+        start_date=pi.get("start_date"),
+        end_date=pi.get("end_date"),
+        extra_context=events
+    )
+
+    logs.append(f"[INFO] Outfit recommendations ready.")
+    return {
+        "activities": activities_list,
+        "outfit_recommendations": outfit_recommendations,
+        "logs": logs,
+    }
+
+
+def node_retrieve_products(state: TravelState) -> TravelState:
+    logs = state.get("logs", [])
+    logs.append("\n[STEP 5] Retrieving products from RAG...")
+
+    pi = state["parsed_intent"]
+    weather = state.get("weather")
+    outfit_recommendations = state.get("outfit_recommendations")
+
+    products = get_raw_products_from_rag(
+        destination=pi.get("destination"),
+        season_hint=pi.get("season_hint"),
+        weather=weather,
+        user_prompt=state["user_prompt"],
+        recommend_outfits=outfit_recommendations,
+        top_k=5,
+    ) or []
+
+    logs.append(f"[INFO] Retrieved {len(products)} products")
+    return {
+        "products": products,
+        "logs": logs,
+    }
+
+
+def node_build_llm_context(state: TravelState) -> TravelState:
+    logs = state.get("logs", [])
+    logs.append("\n[STEP 6] Building LLM context...")
+
+    system_prompt, user_message = build_llm_context(
+        user_prompt=state["user_prompt"],
+        parsed_intent=state["parsed_intent"],
+        weather=state.get("weather"),
+        products=state.get("products"),
+        events=state.get("events"),
+        outfit_recommendations=state.get("outfit_recommendations")
+    )
+
+    logs.append("[INFO] LLM context built.")
+    return {
+        "llm_context": {
+            "system_prompt": system_prompt,
+            "user_message": user_message
+        },
+        "logs": logs,
+    }
+
+
+def node_generate_plan(state: TravelState) -> TravelState:
+    logs = state.get("logs", [])
+    logs.append("\n[STEP 7] Calling LLM to generate formal plan...")
+
+    ctx = state["llm_context"]
+    plan = generate_formal_plan(ctx["system_prompt"], ctx["user_message"])
+
+    logs.append("\n" + "=" * 80)
+    logs.append("FINAL PLAN")
+    logs.append("=" * 80)
+    # You can log a short preview or entire plan; here we keep just a note.
+    logs.append("[INFO] Plan generated.")
+
+    return {
+        "plan": plan,
+        "logs": logs,
+    }
+
+
+# ---------------------------------------------------------------------------------
+# Build the sequential graph
+# ---------------------------------------------------------------------------------
+
+def build_travel_graph():
+    graph = StateGraph(TravelState)
+
+    # Add nodes
+    graph.add_node("parse_intent", node_parse_intent)
+    graph.add_node("fetch_weather", node_fetch_weather)
+    graph.add_node("retrieve_events", node_retrieve_events)
+    graph.add_node("activities_and_outfits", node_build_activities_and_outfits)
+    graph.add_node("retrieve_products", node_retrieve_products)
+    graph.add_node("build_llm_context", node_build_llm_context)
+    graph.add_node("generate_plan", node_generate_plan)
+
+    # Set entry point and connect edges in sequence
+    graph.set_entry_point("parse_intent")
+    graph.add_edge("parse_intent", "fetch_weather")
+    graph.add_edge("fetch_weather", "retrieve_events")
+    graph.add_edge("retrieve_events", "activities_and_outfits")
+    graph.add_edge("activities_and_outfits", "retrieve_products")
+    graph.add_edge("retrieve_products", "build_llm_context")
+    graph.add_edge("build_llm_context", "generate_plan")
+    graph.add_edge("generate_plan", END)
+
+    return graph.compile()
+
+
+# ---------------------------------------------------------------------------------
+# Convenience wrapper (drop-in replacement)
+# ---------------------------------------------------------------------------------
+
+def generate_travel_recommendation_langgraph(user_prompt: str) -> str:
     """
-    Perform semantic (then simple) search and return the raw document payloads.
-    This function is schema-agnostic: it preserves all keys/values found in each
-    retrieved document and performs type-aware normalization to ensure JSON
-    serializability. No field names are hardcoded or assumed.
-
-    CHANGELOG:
-    - Combines all parameters into a single composite query for similarity search.
-    - Sends exactly one search request (semantic, then simple fallback).
+    End-to-end pipeline executed as a sequential LangGraph.
+    Mirrors your original behavior with structured nodes.
     """
+    app = build_travel_graph()
 
-    # --- Init Azure Search client ---
-    try:
-        client = SearchClient(
-            endpoint=os.environ.get("AZURE_SEARCH_ENDPOINT"),
-            index_name=os.environ.get("AZURE_SEARCH_INDEX"),
-            credential=AzureKeyCredential(os.environ.get("AZURE_SEARCH_KEY")),
-        )
-    except Exception as e:
-        print(f"[DEBUG RAG RAW] Azure Search client init failed: {e}")
-        return []
+    initial_state: TravelState = {
+        "user_prompt": user_prompt,
+        "logs": []
+    }
 
-    # --- Helper: normalize values for JSON ---
-    def _normalize_value(v):
-        # Recursively convert values to JSON-serializable Python primitives
-        if v is None:
-            return None
-        if isinstance(v, (str, int, float, bool)):
-            return v
-        if isinstance(v, datetime):
-            return v.isoformat()
-        if isinstance(v, dict):
-            return {str(k): _normalize_value(val) for k, val in v.items()}
-        if isinstance(v, (list, tuple)):
-            return [_normalize_value(i) for i in v]
-        # Fallback: string representation
-        try:
-            return str(v)
-        except Exception:
-            return None
+    final_state = app.invoke(initial_state)
 
-    # --- Helper: document to normalized dict ---
-    def _doc_to_dict(result_obj):
-        # Extract the document payload and normalize recursively
-        doc = None
-        try:
-            if hasattr(result_obj, "document"):
-                doc = result_obj.document
-            elif isinstance(result_obj, dict):
-                doc = result_obj
-            elif hasattr(result_obj, "to_dict"):
-                doc = result_obj.to_dict()
-            else:
-                doc = json.loads(
-                    json.dumps(result_obj, default=lambda o: getattr(o, "__dict__", str(o)))
-                )
-        except Exception:
-            try:
-                doc = json.loads(
-                    json.dumps(result_obj, default=lambda o: getattr(o, "__dict__", str(o)))
-                )
-            except Exception:
-                doc = {}
+    # If you wish to inspect logs:
+    for line in final_state.get("logs", []):
+        print(line)
 
-        if not isinstance(doc, dict):
-            return {}
-
-        normalized = {}
-        for k, val in doc.items():
-            try:
-                normalized[str(k)] = _normalize_value(val)
-            except Exception:
-                normalized[str(k)] = None
-        return normalized
-
-    # --- Build a single composite query string ---
-    def _build_composite_query():
-        parts = []
-
-        if destination:
-            parts.append(f"destination: {destination}")
-
-        if season_hint:
-            parts.append(f"season: {season_hint}")
-
-        # Weather: convert dict into readable attributes
-        if isinstance(weather, dict) and weather:
-            w_parts = []
-            # include common keys if present
-            if weather.get("avg_high_c") is not None:
-                w_parts.append(f"avg_high_c: {weather.get('avg_high_c')} C")
-            if weather.get("avg_low_c") is not None:
-                w_parts.append(f"avg_low_c: {weather.get('avg_low_c')} C")
-            if weather.get("precipitation_chance") is not None:
-                w_parts.append(f"precipitation_chance: {weather.get('precipitation_chance')}%")
-            if weather.get("condition"):
-                w_parts.append(f"condition: {weather.get('condition')}")
-            if w_parts:
-                parts.append("weather: " + ", ".join(w_parts))
-
-        if recommend_outfits:
-            parts.append(f"recommend_outfits: {recommend_outfits}")
-
-        if user_prompt:
-            # Keep the natural language as-is to maximize semantic match
-            parts.append(f"user_prompt: {user_prompt}")
-
-        # Fallback catch-all context (kept from your original code)
-        parts.append("context: any products for travel; store details based on destination and weather")
-
-        # Use separators to help the semantic model parse intent and attributes
-        composite = " | ".join(parts)
-        return composite
-
-    composite_query = _build_composite_query()
-    print(f"[DEBUG RAG RAW] Composite query:\n{composite_query}")
-
-    raw_docs = []
-
-    # --- Single search attempt with composite query ---
-    def _try_search(query_text: str):
-        try:
-            print(f"\n[DEBUG RAG RAW] Trying semantic search for query: '{query_text}'")
-            results = client.search(
-                search_text=query_text,
-                query_type="semantic",
-                semantic_configuration_name=os.environ.get("AZURE_SEARCH_SEMANTIC_CONFIG"),
-                top=top_k,
-            )
-            res_list = list(results)
-            print(f"[DEBUG RAG RAW] Semantic returned {len(res_list)} items")
-            if res_list:
-                return res_list
-        except Exception as e:
-            print(f"[DEBUG RAG RAW] Semantic search error: {e}")
-
-        try:
-            print(f"[DEBUG RAG RAW] Trying simple search for query: '{query_text}'")
-            results = client.search(
-                search_text=query_text,
-                query_type="simple",
-                top=top_k,
-            )
-            res_list = list(results)
-            print(f"[DEBUG RAG RAW] Simple returned {len(res_list)} items")
-            return res_list
-        except Exception as e2:
-            print(f"[DEBUG RAG RAW] Simple search error: {e2}")
-            return []
-
-    results = _try_search(composite_query)
-    if results:
-        for r in results[:top_k]:
-            doc = _doc_to_dict(r)
-            raw_docs.append(doc)
-
-    if not raw_docs:
-        print("[DEBUG RAG RAW] No products found (raw).")
-
-    print(f"[DEBUG RAG RAW] Retrieved {len(raw_docs)} raw documents")
-    return raw_docs
-
-    
-
+    return final_state.get("plan", "")
+# ====================================================================
 
 # =====================================================================
 # 4. LLM CONTEXT: Build structured input
@@ -471,268 +378,13 @@ def generate_formal_plan(system_prompt: str, user_message: str) -> str:
     except Exception as e:
         return f"Error generating plan: {e}"
 
-# =====================================================================
-# 3. EVENTS: Fetch local events from Ticketmaster
-
-def get_local_events(destination: str, start_date: str = None, end_date: str = None, radius_km: int = 50) -> list:
-    """
-    Fetch local events for a destination and date range using Ticketmaster Discovery API.
-    Requires environment variable `TICKETMASTER_KEY`. If not provided, returns [].
-
-    Returns a list of dicts with keys: title, start, end, venue, url, description, weather_sensitive
-    """
-    api_key = os.environ.get("TICKETMASTER_KEY")
-    if not destination:
-        print(f"[DEBUG EVENTS] No destination provided to get_local_events()")
-        return []
-    if not api_key:
-        print(f"[DEBUG EVENTS] TICKETMASTER_KEY not set in environment; returning no events")
-        return []
-
-    geo = geocode_location(destination)
-    if not geo:
-        print(f"[DEBUG EVENTS] Geocoding failed for destination: {destination}")
-        return []
-
-    lat, lon = geo.get("latitude"), geo.get("longitude")
-    if not lat or not lon:
-        return []
-
-    # Build date-time range in ISO with time suffix if provided
-    def to_dt_iso(d):
-        if not d:
-            return None
-        try:
-            dt = datetime.strptime(d, "%Y-%m-%d")
-            return dt.strftime("%Y-%m-%dT00:00:00Z")
-        except Exception:
-            return None
-
-    start_dt = to_dt_iso(start_date)
-    end_dt = to_dt_iso(end_date) or start_dt
-
-    params = {
-        "apikey": api_key,
-        "latlong": f"{lat},{lon}",
-        "radius": int(radius_km * 0.621371),  # Ticketmaster uses miles
-        "unit": "miles",
-        "size": 20,
-    }
-    if start_dt:
-        params["startDateTime"] = start_dt
-    if end_dt:
-        # make end time end of day
-        params["endDateTime"] = end_dt.replace("T00:00:00Z", "T23:59:59Z")
-
-    # Determine SSL verify parameter: allow custom CA bundle via env or default True
-    verify_param = True
-    trusted_ca = os.environ.get("TICKETMASTER_TRUSTED_CA") or os.environ.get("REQUESTS_CA_BUNDLE")
-    if trusted_ca:
-        verify_param = trusted_ca
-
-    try:
-        print(f"[DEBUG EVENTS] Ticketmaster request params: {params}")
-        print(f"[DEBUG EVENTS] Using SSL verify: {verify_param}")
-        resp = requests.get(
-            "https://app.ticketmaster.com/discovery/v2/events.json",
-            params=params,
-            timeout=8,
-            verify=verify_param,
-        )
-        print(f"[DEBUG EVENTS] Ticketmaster HTTP {resp.status_code}")
-        try:
-            data = resp.json()
-        except Exception as je:
-            print(f"[DEBUG EVENTS] Failed to parse JSON from Ticketmaster response: {je}")
-            print(f"[DEBUG EVENTS] Response text (truncated): {resp.text[:1000]}")
-            return []
-        # If the API returns an error structure, log it
-        if not data:
-            print("[DEBUG EVENTS] Empty JSON payload from Ticketmaster")
-            return []
-        if data.get("errors"):
-            print(f"[DEBUG EVENTS] Ticketmaster API errors: {data.get('errors')}")
-            return []
-    except requests.exceptions.SSLError as ssle:
-        print(f"[DEBUG EVENTS] SSL error when contacting Ticketmaster: {ssle}")
-        # Retry with verification disabled as a last resort (insecure) and inform user
-        try:
-            print("[DEBUG EVENTS] Retrying Ticketmaster request with SSL verification disabled (insecure)")
-            resp = requests.get(
-                "https://app.ticketmaster.com/discovery/v2/events.json",
-                params=params,
-                timeout=8,
-                verify=False,
-            )
-            print(f"[DEBUG EVENTS] Retry HTTP {resp.status_code}")
-            try:
-                data = resp.json()
-            except Exception as je:
-                print(f"[DEBUG EVENTS] Failed to parse JSON on retry: {je}")
-                print(f"[DEBUG EVENTS] Response text (truncated): {resp.text[:1000]}")
-                return []
-        except Exception as e:
-            print(f"[DEBUG EVENTS] HTTP retry to Ticketmaster failed: {e}")
-            return []
-    except Exception as e:
-        print(f"[DEBUG EVENTS] HTTP request to Ticketmaster failed: {e}")
-        return []
-
-    events = []
-    embedded = data.get("_embedded", {})
-    evs = embedded.get("events", []) if embedded else []
-    print(f"[DEBUG EVENTS] Ticketmaster returned {len(evs)} events in payload")
-    for e in evs:
-        title = e.get("name")
-        url = e.get("url")
-        dates = e.get("dates", {}).get("start", {})
-        start = dates.get("localDate") or dates.get("dateTime")
-        end = e.get("dates", {}).get("end", {}).get("localDate") if e.get("dates", {}).get("end") else None
-        desc = e.get("info") or e.get("pleaseNote") or ""
-        venue = None
-        try:
-            venue_data = e.get("_embedded", {}).get("venues", [])[0]
-            venue = {
-                "name": venue_data.get("name"),
-                "address": ", ".join(filter(None, [venue_data.get("address", {}).get("line1"), venue_data.get("city", {}).get("name") if venue_data.get("city") else None]))
-            }
-        except Exception:
-            venue = None
-
-        # crude outdoor detection
-        name_desc = (title or "") + " " + (desc or "")
-        outdoor_keywords = ["festival", "fair", "outdoor", "park", "beach", "street", "market"]
-        weather_sensitive = any(k in name_desc.lower() for k in outdoor_keywords)
-
-        events.append({
-            "title": title,
-            "start": start,
-            "end": end,
-            "venue": venue,
-            "url": url,
-            "description": desc,
-            "weather_sensitive": weather_sensitive,
-        })
-
-    return events
-
-
-# =====================================================================
-def generate_travel_recommendation(user_prompt: str) -> str:
-    """
-    End-to-end pipeline: parse intent → fetch weather → retrieve products → generate plan.
-    """
-    print("\n" + "=" * 80)
-    print("TRAVEL RECOMMENDATION PIPELINE")
-    print("=" * 80)
-    
-    # Step 1: Parse intent
-    print("\n[STEP 1] Parsing travel intent...")    
-    parsed_intent = extract_with_llm(user_prompt)
-    
-    # Step 2: Fetch weather
-    print("\n[STEP 2] Fetching weather context...")
-    weather = get_weather_context(
-        destination=parsed_intent.get("destination"),
-        start_date=parsed_intent.get("start_date"),
-        end_date=parsed_intent.get("end_date"),
-    )
-    if weather.get("error"):
-        print(f"[WARNING] Weather fetch: {weather['error']}")
-
-    # Step 3: Retrieve local events for the destination/dates
-    print("\n[STEP 3] Retrieving local events for destination and dates...")
-    events = get_local_events(
-        destination=parsed_intent.get("destination"),
-        start_date=parsed_intent.get("start_date"),
-        end_date=parsed_intent.get("end_date"),
-    )
-    print(f"[INFO] Retrieved {len(events)} events")    
-
-    # step 4 Append outfit recommendations from outfit_planner (if available)
-    
-   # from outfit_planner import recommend_outfits
-    print("\n[STEP 4] Build simple activities list from retrieved `events` and user prompt...")
-    
-    activities_list = []
-    for ev in events or []:
-        if isinstance(ev, dict):
-            name = ev.get("name") or ev.get("title") or ev.get("summary") or ev.get("description")
-            date = ev.get("date") or ev.get("start") or ev.get("start_date")
-            activities_list.append({"type": name or "outing", "date": date})
-        else:
-            activities_list.append(str(ev))
-
-    # Fallback: detect explicit mentions in the user's prompt
-    up = (user_prompt or "").lower()
-    if not activities_list:
-        if "dinner" in up or "party" in up:
-            activities_list.append({"type": "dinner"})
-        if any(x in up for x in ["hike", "hiking", "gym", "yoga", "run", "beach", "swim"]):
-            activities_list.append({"type": "hike"})
-
-    outfit_recommendations = recommend_outfits_llm(
-        activities=activities_list,
-        duration_days=parsed_intent.get("duration_days"),
-        intention="balanced",
-        climate=None,
-        laundry_available=False,
-        weather=weather,
-        destination=parsed_intent.get("destination"),
-        start_date=parsed_intent.get("start_date"),
-        end_date=parsed_intent.get("end_date"),
-        extra_context=events
-    )       
-    print(outfit_recommendations)
-    print(f"[INFO] Retrieved {outfit_recommendations}")       
-    
-    # Step 5: Retrieve products from RAG
-    print("\n[STEP 5] Retrieving products from RAG...")
-    products = get_raw_products_from_rag(
-        destination=parsed_intent.get("destination"),
-        season_hint=parsed_intent.get("season_hint"),
-        weather=weather,
-        user_prompt=user_prompt,
-        recommend_outfits=outfit_recommendations,
-        top_k=5,
-    )
-    print(products)
-    print(f"[INFO] Retrieved {len(products)} products")   
-    
-    
-    # Step 6: Build LLM context
-    print("\n[STEP 6] Building LLM context...")
-    system_prompt, user_message = build_llm_context(
-        user_prompt=user_prompt,
-        parsed_intent=parsed_intent,
-        weather=weather,
-        products=products,
-        events=events,
-        outfit_recommendations=outfit_recommendations
-    )
-    
-    # Step 5: Generate plan
-    print("\n[STEP 5] Calling LLM to generate formal plan...")
-    plan = generate_formal_plan(system_prompt, user_message)
-
-    final_output = f"{plan}"
-
-    
-    
-    print("\n" + "=" * 80)
-    print("FINAL PLAN")
-    print("=" * 80)
-    
-    return final_output
-
 
 # =====================================================================
 # MAIN: Demo Runner
 # =====================================================================
 if __name__ == "__main__":
     user_input = input("Enter your travel request: ")
-
-    plan = generate_travel_recommendation(user_input)
+    plan = generate_travel_recommendation_langgraph(user_input)
     print("\n" + plan)
     print("\n" + "=" * 80)
     

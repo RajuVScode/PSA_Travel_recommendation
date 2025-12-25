@@ -12,7 +12,7 @@ Environment variables:
 - AZURE_OPENAI_MODEL  (e.g., "gpt-4o-mini")
 
 Usage:
-    python outfit_planner_llm.py
+    python outfit_recommendation.py
 """
 
 import os

@@ -33,8 +33,8 @@ Context:
 
 Rules:
 - If only one date is mentioned, set start_date = end_date.
-- duration_days: calculate based on start_date and end_date.
-- season_hint: infer from month if possible (e.g., Dec-Feb => "winter").
+- duration_days: calculate based on start_date and end_date. actual days inclusive. end_date - start_date + 1.
+- season_hint: infer from month if possible (e.g., Dec-Feb => "winter") based on the location and the dates.
 - Parse various date formats:   
 - Parse ranges like "from 5 March to 8 March", "10–12 Jan 2025", "2025-01-10 to 2025-01-12".
 - Support relative: "today", "tomorrow", "this weekend", "next weekend".
@@ -104,6 +104,7 @@ def extract_with_llm(user_prompt: str) -> dict:
                 max_tokens=50,
             )
             result = json.loads(response.choices[0].message.content)
+            print(f"[DEBUG] LLM raw output: {result}")
             destination = result.get("destination")
             start_date = result.get("start_date")
             end_date = result.get("end_date")

@@ -5,7 +5,7 @@ Provides a user-friendly interface for generating formal travel plans.
 
 import gradio as gr
 from gradio_calendar import Calendar
-from main import generate_travel_recommendation
+from main import generate_travel_recommendation_langgraph
 
 
 def generate_plan(user_prompt, destination_override=None, start_date=None, end_date=None):
@@ -47,7 +47,7 @@ def generate_plan(user_prompt, destination_override=None, start_date=None, end_d
         if ed:
             augmented_prompt = f"{augmented_prompt} End Date: {ed}"
 
-        result = generate_travel_recommendation(augmented_prompt)
+        result = generate_travel_recommendation_langgraph(augmented_prompt)
         return result, ""
     except Exception as e:
         error_msg = f"Error generating plan: {str(e)}"
