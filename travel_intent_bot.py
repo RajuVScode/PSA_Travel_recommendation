@@ -31,9 +31,6 @@ load_dotenv()  # Loads .env if present
 AZURE_OPENAI_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT", "").strip()
 AZURE_OPENAI_API_KEY = os.getenv("AZURE_OPENAI_KEY", "").strip()
 
-from datetime import datetime
-
-CURRENT_DATE = datetime.now().strftime("%Y-%m-%d")
 
 if not (AZURE_OPENAI_ENDPOINT and AZURE_OPENAI_API_KEY):
     raise RuntimeError(
@@ -96,55 +93,59 @@ def render_intent_md(intent: TravelIntent) -> str:
 # ------------------------
 # LLM Clarifier Agent
 # ------------------------
-SYSTEM_PROMPT = """
+from datetime import date
+CURRENT_DATE = date.today().isoformat()
+print("Current date for context:", CURRENT_DATE)
+
+SYSTEM_PROMPT_NEW = f"""
 You are a Clarifier Agent for travel planning. Your task:
 - Extract or confirm the user's intent across these fields:
   destination, travel_date, activities, preferred_brand, clothes, budget_amount, budget_currency, notes.
 - Ask ONLY ONE targeted clarifying question per turn if information is missing or ambiguous.
 - If everything is collected and clear, provide a friendly, concise confirmation.
 - Use US English tone, be helpful and polite.
-- Infer budget currency from context; if the user is in US and doesn’t specify, default to USD.
-- Date format: "YYYY-MM-DD" (single date) or "YYYY-MM-DD to YYYY-MM-DD" (range).
-- Activities should be either an array or strings. It should be an array of strings. If the user gives a single activity (e.g., "hiking"),accept it as a valid array with one item and do not ask for more unless the user seems unsure
-- Clothes can be a simple descriptive string (e.g., "casual summer wear").
+- Infer budget currency from context; default to USD.
 - If budget is provided without currency, set currency to USD by default.
+- Activities should be either an array or strings. If the user gives a single activity (e.g., "hiking"),accept it as a valid array with one item and do not ask for more unless the user seems unsure
+- Clothes can be a simple descriptive string (e.g., "casual summer wear").
 - Do NOT ask multiple questions at once; keep it single-question per turn.
 - Respond concisely and avoid over-prompting.
 
-Context:
+ontext:
 - Today's date (ISO): {CURRENT_DATE}
-
-OUTPUT STRICTLY AS A JSON OBJECT with this shape:
-{
-  "assistant_message": "string - what the assistant says to the user in this turn",
-  "updated_intent": {
-      "destination": "string|null",
-      "travel_date": "string|null",
-      "activities": ["string", ...],
-      "preferred_brand": "string|null",
-      "clothes": "string|null",
-      "budget_amount": number|null,
-      "budget_currency": "string|null",
-      "notes": "string|null"
-  },
-  "next_question": "string|null"  // null if all fields are complete
-}
 
 Rules:
 - Keep assistant_message friendly and purposeful.
 - Use next_question only if more info is needed AND ask exactly one question.
 - Never include extra keys or text outside the JSON.
+- please don't consider model date as current date.always use the provided CURRENT_DATE.
 - If only one date is mentioned, set start_date = end_date.
 - Parse various date formats:   
-- Parse ranges like "from 5 March to 8 March", "10–12 Jan 2025", "2025-01-10 to 2025-01-12".
+- Parse ranges like "from 5 March to 8 March", "10-12 Jan 2025", "2025-01-10 to 2025-01-12".
 - Support relative: "today", "tomorrow", "this weekend", "next weekend".
 - "today" => {CURRENT_DATE}
 - "tomorrow" => {CURRENT_DATE} + 1 day
-- "this weekend" => Saturday–Sunday of the current week (based on {CURRENT_DATE})
-- "next weekend" => Saturday–Sunday of the following week (based on {CURRENT_DATE})
+- "this weekend" => Saturday-Sunday of the current week (based on {CURRENT_DATE})
+- "next weekend" => Saturday-Sunday of the following week (based on {CURRENT_DATE})
 - If month/day is given without year, infer the year with a future bias relative to {CURRENT_DATE}.
 - If multiple destinations are mentioned, choose the primary after prepositions (to/in/at/for) or the final city in "heading to …".
-- Output must be valid JSON only. No comments, no trailing commas, no extra fields.
+- Date format: "YYYY-MM-DD" (single date) or "YYYY-MM-DD to YYYY-MM-DD" (range).
+
+OUTPUT STRICTLY AS A JSON OBJECT with this shape:
+{{
+  "assistant_message": "string - what the assistant says to the user in this turn",
+  "updated_intent": {{
+      "destination": "string|null",
+      "travel_date": "string|null",
+      "activities": ["string", ...]|null,
+      "preferred_brand": "string|null",
+      "clothes": "string|null",
+      "budget_amount": number|null,
+      "budget_currency": "string|null",
+      "notes": "string|null"
+  }},
+  "next_question": "string|null"  // null if all fields are complete
+}}
 """
 
 def call_llm_clarifier(user_text: str, current_intent: TravelIntent) -> Dict[str, Any]:
@@ -158,7 +159,7 @@ def call_llm_clarifier(user_text: str, current_intent: TravelIntent) -> Dict[str
         intent_dict["activities"] = []
 
     messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "system", "content": SYSTEM_PROMPT_NEW},
         {
             "role": "user",
             "content": json.dumps({
@@ -182,7 +183,7 @@ def call_llm_clarifier(user_text: str, current_intent: TravelIntent) -> Dict[str
     except json.JSONDecodeError:
         # Fallback minimal structure to prevent crashes
         data = {
-            "assistant_message": "I’m processing that; could you please clarify one detail?",
+            "assistant_message": "I'm processing that; could you please clarify one detail?",
             "updated_intent": intent_dict,
             "next_question": "Could you share your destination city or country?"
         }
@@ -251,10 +252,10 @@ def merge_intent(original: TravelIntent, updates: Dict[str, Any]) -> TravelInten
 # ------------------------
 INTRO_MD = """
 ## ✈️ Travel Intent Clarifier
-Tell me about your trip, and I’ll help capture the essentials: **destination, travel dates, activities, preferred brand, clothes, and budget**.
+Tell me about your trip, and I'll help capture the essentials: **destination, travel dates, activities, preferred brand, clothes, and budget**.
 
 I'll ask **one concise follow-up** at a time until we have a complete plan.  
-You can also paste existing details; I’ll extract and organize them.
+You can also paste existing details; I'll extract and organize them.
 """
 
 def bot_turn(user_message: str, history: List[List[str]], state: Dict[str, Any]):
@@ -322,7 +323,7 @@ with gr.Blocks(title="Travel Intent Clarifier") as demo:
         summary = gr.Markdown(render_intent_md(TravelIntent()), elem_id="summary_panel")
 
     with gr.Row():
-        msg = gr.Textbox(placeholder="Hi! I want to go to Bali in March...", scale=8)
+        msg = gr.Textbox(placeholder="Hi! I want to go to Miami in March...", scale=8)
         send = gr.Button("Send", variant="primary", scale=1)
         reset = gr.Button("Clear", variant="secondary", scale=1)
 
