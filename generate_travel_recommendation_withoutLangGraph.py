@@ -1,3 +1,4 @@
+#without LangGraph, traditional flow
 def generate_travel_recommendation(user_prompt: str) -> str:
     """
     End-to-end pipeline: parse intent → fetch weather → retrieve products → generate plan.
